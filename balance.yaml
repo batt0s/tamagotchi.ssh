@@ -1,0 +1,25 @@
+decay:
+  satiety_per_hour_awake: 3.0
+  satiety_per_hour_sleeping: 1.5
+  happiness_per_hour: 2.0
+  energy_per_hour_awake: 2.0
+  energy_per_hour_sleeping: -15.0
+
+threasholds:
+  sick_after_zero_hours: 6.0
+  death_after_sick_hours: 24.0
+
+modifiers:
+  sick_happiness_multiplier: 2.0
+
+feed:
+  cooldown: 30m
+  gain: 30
+  max_satiety: 90
+
+play:
+  cooldown: 15m
+  energy_cost: 15
+  satiety_cost: 5
+  happiness_gain: 25
+  min_energy: 20
