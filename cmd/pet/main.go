@@ -12,11 +12,15 @@ import (
 	"time"
 
 	gossh "golang.org/x/crypto/ssh"
+	"golang.org/x/time/rate"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/ssh"
 	"github.com/charmbracelet/wish"
 	"github.com/charmbracelet/wish/bubbletea"
+	"github.com/charmbracelet/wish/logging"
+	"github.com/charmbracelet/wish/ratelimiter"
+	"github.com/charmbracelet/wish/recover"
 
 	"github.com/batt0s/tamagotchi.ssh/internal/game"
 	"github.com/batt0s/tamagotchi.ssh/internal/session"
@@ -52,14 +56,21 @@ func main() {
 		return teaHandler(s, balance, petStorage, sessions)
 	}
 
+	limiter := ratelimiter.NewRateLimiter(rate.Limit(5), 10, 128)
+
 	srv, err := wish.NewServer(
 		wish.WithAddress(addr),
 		wish.WithHostKeyPath(hostKeyPath),
+		wish.WithIdleTimeout(5*time.Minute),
 		wish.WithPublicKeyAuth(func(ctx ssh.Context, key ssh.PublicKey) bool {
 			return true
 		}),
 		wish.WithMiddleware(
-			bubbletea.Middleware(handler),
+			recover.Middleware(
+				ratelimiter.Middleware(limiter),
+				logging.Middleware(),
+				bubbletea.Middleware(handler),
+			),
 		),
 	)
 
@@ -118,6 +129,11 @@ func teaHandler(
 		return tui.NewMessage("Couldn't load pet. \nError:"+err.Error(), pty.Window.Width, pty.Window.Height), nil
 	}
 
+	offlineDuration := time.Duration(0)
+	if !p.LastCalc.IsZero() && p.LastCalc.Before(now) {
+		offlineDuration = now.Sub(p.LastCalc)
+	}
+
 	p.Apply(now, balance)
 
 	go func() {
@@ -134,5 +150,6 @@ func teaHandler(
 		Pet:         p,
 		Balance:     balance,
 		Storage:     petStorage,
+		OfflineTime: offlineDuration,
 	}, pty.Window.Width, pty.Window.Height), []tea.ProgramOption{tea.WithAltScreen()}
 }

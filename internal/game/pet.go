@@ -180,9 +180,6 @@ func (p *Pet) Wake(now time.Time, b *Balance) error {
 	if p.Dead {
 		return ErrDead
 	}
-	if p.Sleeping {
-		return ErrSleeping
-	}
 	p.Sleeping = false
 	return nil
 }
