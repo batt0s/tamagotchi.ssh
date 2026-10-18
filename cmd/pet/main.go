@@ -18,16 +18,39 @@ import (
 	"github.com/charmbracelet/wish"
 	"github.com/charmbracelet/wish/bubbletea"
 
+	"github.com/batt0s/tamagotchi.ssh/internal/game"
+	"github.com/batt0s/tamagotchi.ssh/internal/session"
+	"github.com/batt0s/tamagotchi.ssh/internal/storage"
 	"github.com/batt0s/tamagotchi.ssh/internal/tui"
 )
 
 const (
 	addr        = ":2222"
 	hostKeyPath = ".ssh/pet_ed25519"
+	dataDir     = "data"
+	balancePath = "balance.yaml"
 )
 
 func main() {
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo})))
+
+	balance, err := game.LoadBalance(balancePath)
+	if err != nil {
+		slog.Error("couldn't load balance", "err", err)
+		os.Exit(1)
+	}
+
+	petStorage, err := storage.NewJSONStorage(dataDir)
+	if err != nil {
+		slog.Error("couldn't load storage", "err", err)
+		os.Exit(1)
+	}
+
+	sessions := session.NewManager()
+
+	handler := func(s ssh.Session) (tea.Model, []tea.ProgramOption) {
+		return teaHandler(s, balance, petStorage, sessions)
+	}
 
 	srv, err := wish.NewServer(
 		wish.WithAddress(addr),
@@ -36,7 +59,7 @@ func main() {
 			return true
 		}),
 		wish.WithMiddleware(
-			bubbletea.Middleware(teaHandler),
+			bubbletea.Middleware(handler),
 		),
 	)
 
@@ -63,7 +86,12 @@ func main() {
 	_ = srv.Shutdown(ctx)
 }
 
-func teaHandler(s ssh.Session) (tea.Model, []tea.ProgramOption) {
+func teaHandler(
+	s ssh.Session,
+	balance *game.Balance,
+	petStorage storage.Storage,
+	sessions *session.Manager,
+) (tea.Model, []tea.ProgramOption) {
 	pty, _, _ := s.Pty()
 
 	var fp string
@@ -71,9 +99,40 @@ func teaHandler(s ssh.Session) (tea.Model, []tea.ProgramOption) {
 	if pk := s.PublicKey(); pk != nil {
 		fp = gossh.FingerprintSHA256(pk)
 	} else {
-		fp = "SHA256:unknown"
+		return tui.NewMessage("Couldn't verify Identity", pty.Window.Width, pty.Window.Height), nil
 	}
 
-	m := tui.New(fp, pty.Window.Width, pty.Window.Height)
-	return m, []tea.ProgramOption{tea.WithAltScreen()}
+	if !sessions.TryAcquire(fp) {
+		slog.Info("Double Session Denied", "fp", fp)
+		return tui.NewMessage(
+			"You are already connected. Double sessions are not allowed.",
+			pty.Window.Width, pty.Window.Height,
+		), nil
+	}
+
+	now := time.Now()
+	p, err := petStorage.LoadOrCreate(fp, now)
+	if err != nil {
+		sessions.Release(fp)
+		slog.Error("couldn't load pet", "fp", fp, "err", err)
+		return tui.NewMessage("Couldn't load pet. \nError:"+err.Error(), pty.Window.Width, pty.Window.Height), nil
+	}
+
+	p.Apply(now, balance)
+
+	go func() {
+		<-s.Context().Done()
+		sessions.Release(fp)
+		slog.Info("logout", "fp", fp)
+	}()
+
+	slog.Info("login", "fp", fp,
+		"satiety", p.Satiety, "happiness", p.Happiness, "energy", p.Energy)
+
+	return tui.New(tui.Deps{
+		Fingerprint: fp,
+		Pet:         p,
+		Balance:     balance,
+		Storage:     petStorage,
+	}, pty.Window.Width, pty.Window.Height), []tea.ProgramOption{tea.WithAltScreen()}
 }

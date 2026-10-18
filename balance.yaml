@@ -5,7 +5,7 @@ decay:
   energy_per_hour_awake: 2.0
   energy_per_hour_sleeping: -15.0
 
-threasholds:
+thresholds:
   sick_after_zero_hours: 6.0
   death_after_sick_hours: 24.0
 
