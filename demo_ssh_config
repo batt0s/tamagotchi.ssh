@@ -1,0 +1,10 @@
+# SSH config used by demo.tape.
+Host pet
+    HostName localhost
+    Port 2222
+    User demo
+    IdentityFile .ssh/demo_ed25519
+    IdentitiesOnly yes
+    StrictHostKeyChecking no
+    UserKnownHostsFile /dev/null
+    LogLevel ERROR
