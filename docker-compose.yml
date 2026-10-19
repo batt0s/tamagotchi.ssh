@@ -1,0 +1,15 @@
+services:
+  tamagotchi-ssh:
+    build: .
+    image: tamagotchi-ssh
+    container_name: tamagotchi-ssh
+    restart: unless-stopped
+    ports:
+      - "2222:2222"
+    volumes:
+      - tamagotchi-ssh-keys:/app/.ssh
+      - tamagotchi-ssh-data:/app/data
+
+volumes:
+  tamagotchi-ssh-keys:
+  tamagotchi-ssh-data:

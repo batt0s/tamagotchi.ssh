@@ -1,0 +1,9 @@
+.git
+.github
+.ssh
+bin
+data
+demo.gif
+demo.tape
+debug.log
+*.log
