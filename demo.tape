@@ -28,10 +28,10 @@ Enter
 Sleep 3s
 
 Type "f"
-Sleep 1s
+Sleep 2s
 
 Type "p"
-Sleep 1s
+Sleep 2s
 
 Type "s"
 Sleep 1s

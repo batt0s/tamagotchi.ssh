@@ -3,6 +3,7 @@ package tui
 
 import (
 	"fmt"
+	"math"
 	"strings"
 	"time"
 
@@ -10,13 +11,19 @@ import (
 	"github.com/batt0s/tamagotchi.ssh/internal/storage"
 	"github.com/charmbracelet/bubbles/progress"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/harmonica"
 	"github.com/charmbracelet/lipgloss"
 )
 
-const saveInterval = 15 * time.Second
+const (
+	saveInterval   = 15 * time.Second
+	frameInterval  = time.Second / 30
+	petFrameHeight = 7
+)
 
 type saveTickMsg struct{}
 type refreshMsg struct{}
+type frameMsg struct{}
 
 type Deps struct {
 	Fingerprint string
@@ -39,6 +46,15 @@ type Model struct {
 	statusMsg  string
 	statusErr  bool
 
+	petSpring  harmonica.Spring
+	petXSpring harmonica.Spring
+	petY       float64
+	petV       float64
+	petX       float64
+	petXV      float64
+	animFrame  int
+	animating  bool
+
 	pSat, pHap, pEne progress.Model
 }
 
@@ -58,6 +74,8 @@ func New(d Deps, width, height int) Model {
 		width:      width,
 		height:     height,
 		showReport: showReport,
+		petSpring:  harmonica.NewSpring(frameInterval.Seconds(), 12, 0.35),
+		petXSpring: harmonica.NewSpring(frameInterval.Seconds(), 25, 0.15),
 		pSat:       progress.New(progress.WithDefaultGradient(), progress.WithWidth(30), progress.WithColorProfile(d.Renderer.ColorProfile())),
 		pHap:       progress.New(progress.WithDefaultGradient(), progress.WithWidth(30), progress.WithColorProfile(d.Renderer.ColorProfile())),
 		pEne:       progress.New(progress.WithDefaultGradient(), progress.WithWidth(30), progress.WithColorProfile(d.Renderer.ColorProfile())),
@@ -74,6 +92,10 @@ func saveTick() tea.Cmd {
 
 func tickEverySecond() tea.Cmd {
 	return tea.Tick(time.Second, func(time.Time) tea.Msg { return refreshMsg{} })
+}
+
+func tickFrame() tea.Cmd {
+	return tea.Tick(frameInterval, func(time.Time) tea.Msg { return frameMsg{} })
 }
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -94,6 +116,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case refreshMsg:
 		m.deps.Pet.Apply(time.Now(), m.deps.Balance)
 		return m, tickEverySecond()
+	case frameMsg:
+		return m, m.updateAnimation()
 	case tea.KeyMsg:
 		return m.handleKey(msg)
 	}
@@ -113,20 +137,31 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
+	var cmd tea.Cmd
+
 	switch key {
 	case "q", "esc", "ctrl+c":
 		m.persist()
 		m.quitting = true
 		return m, tea.Quit
 	case "f", "F":
-		m.doAction(m.deps.Pet.Feed(time.Now(), m.deps.Balance), "You feed. +30 Satiety!")
+		if m.doAction(m.deps.Pet.Feed(time.Now(), m.deps.Balance), "You feed. +30 Satiety!") {
+			cmd = m.shake(50)
+		}
 	case "p", "P":
-		m.doAction(m.deps.Pet.Play(time.Now(), m.deps.Balance), "You play. +25 Happiness!")
+		if m.doAction(m.deps.Pet.Play(time.Now(), m.deps.Balance), "You play. +25 Happiness!") {
+			cmd = m.bounce(90)
+		}
 	case "s", "S":
 		if m.deps.Pet.Sleeping {
-			m.doAction(m.deps.Pet.Wake(time.Now(), m.deps.Balance), "Wake up!")
+			if m.doAction(m.deps.Pet.Wake(time.Now(), m.deps.Balance), "Wake up!") {
+				cmd = m.bounce(35)
+			}
 		} else {
 			m.doAction(m.deps.Pet.Sleep(time.Now(), m.deps.Balance), "Sleeping...")
+			// Drop to the ground, but leave the current animation loop alone so
+			// a pending frame can finish it without starting a second loop.
+			m.petY, m.petV = 0, 0
 		}
 	case "r", "R":
 		if m.deps.Pet.Dead {
@@ -134,17 +169,61 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.deps.Pet = newPet
 			m.deps.Storage.Save(m.deps.Fingerprint, newPet)
 			m.setStatus("A new egg! Reborn.", false)
+			cmd = m.bounce(60)
 		}
 	}
-	return m, nil
+	return m, cmd
 }
 
-func (m *Model) doAction(err error, successMsg string) {
+func (m *Model) doAction(err error, successMsg string) bool {
 	if err != nil {
 		m.setStatus(err.Error(), true)
-	} else {
-		m.setStatus(successMsg, false)
+		return false
 	}
+	m.setStatus(successMsg, false)
+	return true
+}
+
+// bounce adds an upward impulse to the pet and starts the animation loop.
+func (m *Model) bounce(velocity float64) tea.Cmd {
+	m.petV += velocity
+	return m.startAnimation()
+}
+
+// shake adds a horizontal impulse to the pet and starts the animation loop.
+func (m *Model) shake(velocity float64) tea.Cmd {
+	m.petXV += velocity
+	return m.startAnimation()
+}
+
+func (m *Model) startAnimation() tea.Cmd {
+	if m.animating {
+		return nil
+	}
+	m.animating = true
+	m.animFrame = 0
+	return tickFrame()
+}
+
+func (m *Model) updateAnimation() tea.Cmd {
+	m.petY, m.petV = m.petSpring.Update(m.petY, m.petV, 0)
+	m.petX, m.petXV = m.petXSpring.Update(m.petX, m.petXV, 0)
+	m.animFrame++
+
+	settledY := math.Abs(m.petY) < 0.02 && math.Abs(m.petV) < 0.02
+	settledX := math.Abs(m.petX) < 0.02 && math.Abs(m.petXV) < 0.02
+	if (settledY && settledX) || m.animFrame > 120 {
+		m.stopAnimation()
+		return nil
+	}
+	return tickFrame()
+}
+
+func (m *Model) stopAnimation() {
+	m.petY, m.petV = 0, 0
+	m.petX, m.petXV = 0, 0
+	m.animFrame = 0
+	m.animating = false
 }
 
 func (m *Model) setStatus(msg string, isErr bool) {
@@ -224,9 +303,11 @@ func (m *Model) viewGame() string {
 		Foreground(lipgloss.Color("205")).
 		Render("🐣 SSH Tamagotchi @ battos.dev")
 
+	petArt := renderPetArt(getPetAscii(p), int(math.Round(m.petY)), petFrameHeight)
+	petArt = shiftPetArt(petArt, int(math.Round(m.petX)))
 	petVisual := m.deps.Renderer.NewStyle().
 		Foreground(lipgloss.Color("212")).
-		Render(getPetAscii(p))
+		Render(petArt)
 
 	statStyle := m.deps.Renderer.NewStyle().Width(12)
 	satStr := statStyle.Render("Satiety") + m.pSat.ViewAs(float64(p.Satiety)/100)
