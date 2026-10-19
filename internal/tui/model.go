@@ -24,6 +24,7 @@ type Deps struct {
 	Balance     *game.Balance
 	Storage     storage.Storage
 	OfflineTime time.Duration
+	Renderer    *lipgloss.Renderer
 }
 
 type Model struct {
@@ -49,14 +50,17 @@ func New(d Deps, width, height int) Model {
 		height = 24
 	}
 	showReport := d.OfflineTime > 1*time.Minute
+	if d.Renderer == nil {
+		d.Renderer = lipgloss.DefaultRenderer()
+	}
 	return Model{
 		deps:       d,
 		width:      width,
 		height:     height,
 		showReport: showReport,
-		pSat:       progress.New(progress.WithDefaultGradient(), progress.WithWidth(30)),
-		pHap:       progress.New(progress.WithDefaultGradient(), progress.WithWidth(30)),
-		pEne:       progress.New(progress.WithDefaultGradient(), progress.WithWidth(30)),
+		pSat:       progress.New(progress.WithDefaultGradient(), progress.WithWidth(30), progress.WithColorProfile(d.Renderer.ColorProfile())),
+		pHap:       progress.New(progress.WithDefaultGradient(), progress.WithWidth(30), progress.WithColorProfile(d.Renderer.ColorProfile())),
+		pEne:       progress.New(progress.WithDefaultGradient(), progress.WithWidth(30), progress.WithColorProfile(d.Renderer.ColorProfile())),
 	}
 }
 
@@ -174,7 +178,7 @@ func (m Model) View() string {
 func (m *Model) viewReport() string {
 	hours := m.deps.OfflineTime.Hours()
 
-	title := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("205")).
+	title := m.deps.Renderer.NewStyle().Bold(true).Foreground(lipgloss.Color("205")).
 		Render("🐣 While you were away...")
 
 	text := fmt.Sprintf("%.1f hours passed.", hours)
@@ -184,17 +188,17 @@ func (m *Model) viewReport() string {
 
 	p := m.deps.Pet
 	durum := "Looks well"
-	stil := lipgloss.NewStyle().Foreground(lipgloss.Color("42")) // yeşil
+	stil := m.deps.Renderer.NewStyle().Foreground(lipgloss.Color("42")) // yeşil
 
 	if p.Dead {
 		durum = "Died from hunger..."
-		stil = lipgloss.NewStyle().Foreground(lipgloss.Color("196")) // kırmızı
+		stil = m.deps.Renderer.NewStyle().Foreground(lipgloss.Color("196")) // kırmızı
 	} else if p.Sick {
 		durum = "Fell ill, it needs medication!"
-		stil = lipgloss.NewStyle().Foreground(lipgloss.Color("208")) // turuncu
+		stil = m.deps.Renderer.NewStyle().Foreground(lipgloss.Color("208")) // turuncu
 	} else if p.Satiety < 30 || p.Happiness < 30 {
 		durum = "Very hungry and sad..."
-		stil = lipgloss.NewStyle().Foreground(lipgloss.Color("208"))
+		stil = m.deps.Renderer.NewStyle().Foreground(lipgloss.Color("208"))
 	}
 
 	body := lipgloss.JoinVertical(lipgloss.Center,
@@ -206,7 +210,7 @@ func (m *Model) viewReport() string {
 		"",
 		stil.Render(durum),
 		"",
-		lipgloss.NewStyle().Foreground(lipgloss.Color("241")).Render("Press any key to continue..."),
+		m.deps.Renderer.NewStyle().Foreground(lipgloss.Color("241")).Render("Press any key to continue..."),
 	)
 
 	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, body)
@@ -215,16 +219,16 @@ func (m *Model) viewReport() string {
 func (m *Model) viewGame() string {
 	p := m.deps.Pet
 
-	title := lipgloss.NewStyle().
+	title := m.deps.Renderer.NewStyle().
 		Bold(true).
 		Foreground(lipgloss.Color("205")).
 		Render("🐣 SSH Tamagotchi @ battos.dev")
 
-	petVisual := lipgloss.NewStyle().
+	petVisual := m.deps.Renderer.NewStyle().
 		Foreground(lipgloss.Color("212")).
 		Render(getPetAscii(p))
 
-	statStyle := lipgloss.NewStyle().Width(12)
+	statStyle := m.deps.Renderer.NewStyle().Width(12)
 	satStr := statStyle.Render("Satiety") + m.pSat.ViewAs(float64(p.Satiety)/100)
 	hapStr := statStyle.Render("Happiness") + m.pHap.ViewAs(float64(p.Happiness)/100)
 	eneStr := statStyle.Render("Energy") + m.pEne.ViewAs(float64(p.Energy)/100)
@@ -233,18 +237,18 @@ func (m *Model) viewGame() string {
 
 	var actions []string
 	if p.Dead {
-		actions = append(actions, lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Render("[R] Revive"))
+		actions = append(actions, m.deps.Renderer.NewStyle().Foreground(lipgloss.Color("196")).Render("[R] Revive"))
 	} else if p.Sleeping {
 		actions = append(actions, "[S] Wake up!")
 	} else {
 		if p.Satiety >= m.deps.Balance.Feed.MaxSatiety {
-			actions = append(actions, lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Render("[F] Feed (Full)"))
+			actions = append(actions, m.deps.Renderer.NewStyle().Foreground(lipgloss.Color("240")).Render("[F] Feed (Full)"))
 		} else {
 			actions = append(actions, "[F] Feed")
 		}
 
 		if p.Energy < m.deps.Balance.Play.MinEnergy {
-			actions = append(actions, lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Render("[P] Play (Tired)"))
+			actions = append(actions, m.deps.Renderer.NewStyle().Foreground(lipgloss.Color("240")).Render("[P] Play (Tired)"))
 		} else {
 			actions = append(actions, "[P] Play")
 		}
@@ -260,7 +264,7 @@ func (m *Model) viewGame() string {
 		if m.statusErr {
 			c = lipgloss.Color("196")
 		}
-		statusLine = lipgloss.NewStyle().Foreground(c).Render(m.statusMsg)
+		statusLine = m.deps.Renderer.NewStyle().Foreground(c).Render(m.statusMsg)
 	}
 
 	saveInfo := "-"
@@ -269,15 +273,15 @@ func (m *Model) viewGame() string {
 			time.Since(m.lastSavedAt).Round(time.Second))
 	}
 	if m.saveErr != nil {
-		saveInfo = lipgloss.NewStyle().Foreground(lipgloss.Color("196")).
+		saveInfo = m.deps.Renderer.NewStyle().Foreground(lipgloss.Color("196")).
 			Render("ERROR: " + m.saveErr.Error())
 	}
 
-	help := lipgloss.NewStyle().
+	help := m.deps.Renderer.NewStyle().
 		Foreground(lipgloss.Color("241")).
 		Render("q / esc / ctrl+c → quit")
 
-	footer := lipgloss.NewStyle().
+	footer := m.deps.Renderer.NewStyle().
 		Foreground(lipgloss.Color("241")).
 		Render(fmt.Sprintf("Last save: %s | Help: %s", saveInfo, help))
 
@@ -328,16 +332,20 @@ type MessageModel struct {
 	width    int
 	height   int
 	quitting bool
+	renderer *lipgloss.Renderer
 }
 
-func NewMessage(text string, width, height int) *MessageModel {
+func NewMessage(text string, width, height int, renderer *lipgloss.Renderer) *MessageModel {
 	if width <= 0 {
 		width = 80
 	}
 	if height <= 0 {
 		height = 24
 	}
-	return &MessageModel{text: text, width: width, height: height}
+	if renderer == nil {
+		renderer = lipgloss.DefaultRenderer()
+	}
+	return &MessageModel{text: text, width: width, height: height, renderer: renderer}
 }
 
 func (m *MessageModel) Init() tea.Cmd { return nil }
@@ -363,7 +371,7 @@ func (m *MessageModel) View() string {
 	body := lipgloss.JoinVertical(lipgloss.Center,
 		m.text,
 		"",
-		lipgloss.NewStyle().Foreground(lipgloss.Color("241")).
+		m.renderer.NewStyle().Foreground(lipgloss.Color("241")).
 			Render("enter / q  →  exit"),
 	)
 	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, body)

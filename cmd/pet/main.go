@@ -104,20 +104,21 @@ func teaHandler(
 	sessions *session.Manager,
 ) (tea.Model, []tea.ProgramOption) {
 	pty, _, _ := s.Pty()
+	renderer := bubbletea.MakeRenderer(s)
 
 	var fp string
 
 	if pk := s.PublicKey(); pk != nil {
 		fp = gossh.FingerprintSHA256(pk)
 	} else {
-		return tui.NewMessage("Couldn't verify Identity", pty.Window.Width, pty.Window.Height), nil
+		return tui.NewMessage("Couldn't verify Identity", pty.Window.Width, pty.Window.Height, renderer), nil
 	}
 
 	if !sessions.TryAcquire(fp) {
 		slog.Info("Double Session Denied", "fp", fp)
 		return tui.NewMessage(
 			"You are already connected. Double sessions are not allowed.",
-			pty.Window.Width, pty.Window.Height,
+			pty.Window.Width, pty.Window.Height, renderer,
 		), nil
 	}
 
@@ -126,7 +127,7 @@ func teaHandler(
 	if err != nil {
 		sessions.Release(fp)
 		slog.Error("couldn't load pet", "fp", fp, "err", err)
-		return tui.NewMessage("Couldn't load pet. \nError:"+err.Error(), pty.Window.Width, pty.Window.Height), nil
+		return tui.NewMessage("Couldn't load pet. \nError:"+err.Error(), pty.Window.Width, pty.Window.Height, renderer), nil
 	}
 
 	offlineDuration := time.Duration(0)
@@ -151,5 +152,6 @@ func teaHandler(
 		Balance:     balance,
 		Storage:     petStorage,
 		OfflineTime: offlineDuration,
+		Renderer:    renderer,
 	}, pty.Window.Width, pty.Window.Height), []tea.ProgramOption{tea.WithAltScreen()}
 }
