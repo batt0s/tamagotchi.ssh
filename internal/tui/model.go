@@ -42,9 +42,13 @@ type Model struct {
 	lastSavedAt time.Time
 	saveErr     error
 
-	showReport bool
-	statusMsg  string
-	statusErr  bool
+	showReport  bool
+	statusMsg   string
+	statusErr   bool
+	statusUntil time.Time
+
+	palette    palette
+	actionKind petAction
 
 	petSpring  harmonica.Spring
 	petXSpring harmonica.Spring
@@ -69,17 +73,30 @@ func New(d Deps, width, height int) Model {
 	if d.Renderer == nil {
 		d.Renderer = lipgloss.DefaultRenderer()
 	}
+	pal := newPalette(d.Renderer)
 	return Model{
 		deps:       d,
 		width:      width,
 		height:     height,
 		showReport: showReport,
+		palette:    pal,
 		petSpring:  harmonica.NewSpring(frameInterval.Seconds(), 12, 0.35),
 		petXSpring: harmonica.NewSpring(frameInterval.Seconds(), 25, 0.15),
-		pSat:       progress.New(progress.WithDefaultGradient(), progress.WithWidth(30), progress.WithColorProfile(d.Renderer.ColorProfile())),
-		pHap:       progress.New(progress.WithDefaultGradient(), progress.WithWidth(30), progress.WithColorProfile(d.Renderer.ColorProfile())),
-		pEne:       progress.New(progress.WithDefaultGradient(), progress.WithWidth(30), progress.WithColorProfile(d.Renderer.ColorProfile())),
+		pSat:       newProgress(d.Renderer, pal, pal.satietyA, pal.satietyB),
+		pHap:       newProgress(d.Renderer, pal, pal.happinessA, pal.happinessB),
+		pEne:       newProgress(d.Renderer, pal, pal.energyA, pal.energyB),
 	}
+}
+
+func newProgress(renderer *lipgloss.Renderer, pal palette, colorA, colorB string) progress.Model {
+	p := progress.New(
+		progress.WithGradient(colorA, colorB),
+		progress.WithWidth(30),
+		progress.WithColorProfile(renderer.ColorProfile()),
+	)
+	p.EmptyColor = pal.empty
+	p.PercentageStyle = renderer.NewStyle().Foreground(pal.muted)
+	return p
 }
 
 func (m Model) Init() tea.Cmd {
@@ -114,7 +131,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.persist()
 		return m, saveTick()
 	case refreshMsg:
-		m.deps.Pet.Apply(time.Now(), m.deps.Balance)
+		now := time.Now()
+		m.deps.Pet.Apply(now, m.deps.Balance)
+		if !m.statusUntil.IsZero() && !now.Before(m.statusUntil) {
+			m.statusMsg = ""
+			m.statusErr = false
+			m.statusUntil = time.Time{}
+		}
 		return m, tickEverySecond()
 	case frameMsg:
 		return m, m.updateAnimation()
@@ -146,19 +169,23 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, tea.Quit
 	case "f", "F":
 		if m.doAction(m.deps.Pet.Feed(time.Now(), m.deps.Balance), "You feed. +30 Satiety!") {
+			m.actionKind = petActionFeed
 			cmd = m.shake(50)
 		}
 	case "p", "P":
 		if m.doAction(m.deps.Pet.Play(time.Now(), m.deps.Balance), "You play. +25 Happiness!") {
+			m.actionKind = petActionPlay
 			cmd = m.bounce(90)
 		}
 	case "s", "S":
 		if m.deps.Pet.Sleeping {
 			if m.doAction(m.deps.Pet.Wake(time.Now(), m.deps.Balance), "Wake up!") {
+				m.actionKind = petActionPlay
 				cmd = m.bounce(35)
 			}
 		} else {
 			m.doAction(m.deps.Pet.Sleep(time.Now(), m.deps.Balance), "Sleeping...")
+			m.actionKind = petActionNone
 			// Drop to the ground, but leave the current animation loop alone so
 			// a pending frame can finish it without starting a second loop.
 			m.petY, m.petV = 0, 0
@@ -169,6 +196,7 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.deps.Pet = newPet
 			m.deps.Storage.Save(m.deps.Fingerprint, newPet)
 			m.setStatus("A new egg! Reborn.", false)
+			m.actionKind = petActionPlay
 			cmd = m.bounce(60)
 		}
 	}
@@ -224,11 +252,17 @@ func (m *Model) stopAnimation() {
 	m.petX, m.petXV = 0, 0
 	m.animFrame = 0
 	m.animating = false
+	m.actionKind = petActionNone
 }
 
 func (m *Model) setStatus(msg string, isErr bool) {
 	m.statusMsg = msg
 	m.statusErr = isErr
+	if msg == "" {
+		m.statusUntil = time.Time{}
+		return
+	}
+	m.statusUntil = time.Now().Add(3 * time.Second)
 }
 
 func (m *Model) persist() {
@@ -257,7 +291,7 @@ func (m Model) View() string {
 func (m *Model) viewReport() string {
 	hours := m.deps.OfflineTime.Hours()
 
-	title := m.deps.Renderer.NewStyle().Bold(true).Foreground(lipgloss.Color("205")).
+	title := m.deps.Renderer.NewStyle().Bold(true).Foreground(m.palette.title).
 		Render("🐣 While you were away...")
 
 	text := fmt.Sprintf("%.1f hours passed.", hours)
@@ -266,125 +300,183 @@ func (m *Model) viewReport() string {
 	}
 
 	p := m.deps.Pet
-	durum := "Looks well"
-	stil := m.deps.Renderer.NewStyle().Foreground(lipgloss.Color("42")) // yeşil
-
+	mood := "Looks well"
 	if p.Dead {
-		durum = "Died from hunger..."
-		stil = m.deps.Renderer.NewStyle().Foreground(lipgloss.Color("196")) // kırmızı
+		mood = "Died from hunger..."
 	} else if p.Sick {
-		durum = "Fell ill, it needs medication!"
-		stil = m.deps.Renderer.NewStyle().Foreground(lipgloss.Color("208")) // turuncu
+		mood = "Fell ill, it needs medication!"
 	} else if p.Satiety < 30 || p.Happiness < 30 {
-		durum = "Very hungry and sad..."
-		stil = m.deps.Renderer.NewStyle().Foreground(lipgloss.Color("208"))
+		mood = "Very hungry and sad..."
 	}
 
+	petColor := m.palette.petColor(p)
 	body := lipgloss.JoinVertical(lipgloss.Center,
 		title,
 		"",
-		text,
+		m.deps.Renderer.NewStyle().Foreground(m.palette.text).Render(text),
 		"",
-		getPetAscii(p),
+		m.deps.Renderer.NewStyle().Foreground(petColor).Render(getPetAscii(p)),
 		"",
-		stil.Render(durum),
+		m.deps.Renderer.NewStyle().Foreground(petColor).Render(mood),
 		"",
-		m.deps.Renderer.NewStyle().Foreground(lipgloss.Color("241")).Render("Press any key to continue..."),
+		m.muted("Press any key to continue..."),
 	)
 
-	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, body)
+	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, m.panel(body))
 }
 
 func (m *Model) viewGame() string {
 	p := m.deps.Pet
 
-	title := m.deps.Renderer.NewStyle().
-		Bold(true).
-		Foreground(lipgloss.Color("205")).
+	title := m.deps.Renderer.NewStyle().Bold(true).Foreground(m.palette.title).
 		Render("🐣 SSH Tamagotchi @ battos.dev")
+	subtitle := lipgloss.JoinHorizontal(lipgloss.Left,
+		m.muted("Playing as "+shorten(m.deps.Fingerprint)),
+		m.muted(" · "),
+		m.deps.Renderer.NewStyle().Foreground(m.palette.petColor(p)).Render(statusLine(p)),
+	)
 
-	petArt := renderPetArt(getPetAscii(p), int(math.Round(m.petY)), petFrameHeight)
+	rawPet := getPetAsciiFor(p, m.actionKind)
+	petArt := renderPetArt(rawPet, int(math.Round(m.petY)), petFrameHeight)
 	petArt = shiftPetArt(petArt, int(math.Round(m.petX)))
-	petVisual := m.deps.Renderer.NewStyle().
-		Foreground(lipgloss.Color("212")).
-		Render(petArt)
+	petVisual := m.deps.Renderer.NewStyle().Foreground(m.palette.petColor(p)).Render(petArt)
+	ground := m.muted(groundArt(petArtWidth(rawPet), int(math.Round(m.petY))))
 
-	statStyle := m.deps.Renderer.NewStyle().Width(12)
-	satStr := statStyle.Render("Satiety") + m.pSat.ViewAs(float64(p.Satiety)/100)
-	hapStr := statStyle.Render("Happiness") + m.pHap.ViewAs(float64(p.Happiness)/100)
-	eneStr := statStyle.Render("Energy") + m.pEne.ViewAs(float64(p.Energy)/100)
+	satiety := m.label("Satiety") + m.pSat.ViewAs(float64(p.Satiety)/100)
+	happy := m.label("Happiness") + m.pHap.ViewAs(float64(p.Happiness)/100)
+	energy := m.label("Energy") + m.pEne.ViewAs(float64(p.Energy)/100)
+	stats := lipgloss.JoinVertical(lipgloss.Left, satiety, "", happy, "", energy)
 
-	stats := lipgloss.JoinVertical(lipgloss.Left, satStr, hapStr, eneStr)
-
-	var actions []string
-	if p.Dead {
-		actions = append(actions, m.deps.Renderer.NewStyle().Foreground(lipgloss.Color("196")).Render("[R] Revive"))
-	} else if p.Sleeping {
-		actions = append(actions, "[S] Wake up!")
-	} else {
-		if p.Satiety >= m.deps.Balance.Feed.MaxSatiety {
-			actions = append(actions, m.deps.Renderer.NewStyle().Foreground(lipgloss.Color("240")).Render("[F] Feed (Full)"))
-		} else {
-			actions = append(actions, "[F] Feed")
-		}
-
-		if p.Energy < m.deps.Balance.Play.MinEnergy {
-			actions = append(actions, m.deps.Renderer.NewStyle().Foreground(lipgloss.Color("240")).Render("[P] Play (Tired)"))
-		} else {
-			actions = append(actions, "[P] Play")
-		}
-
-		actions = append(actions, "[S] Sleep")
-	}
-
-	actionBar := lipgloss.JoinHorizontal(lipgloss.Left, actions...)
-
-	statusLine := " "
+	statusText := " "
 	if m.statusMsg != "" {
-		c := lipgloss.Color("42")
+		color := m.palette.success
 		if m.statusErr {
-			c = lipgloss.Color("196")
+			color = m.palette.error
 		}
-		statusLine = m.deps.Renderer.NewStyle().Foreground(c).Render(m.statusMsg)
+		statusText = m.deps.Renderer.NewStyle().Foreground(color).Render(m.statusMsg)
 	}
 
-	saveInfo := "-"
+	saveInfo := "not saved yet"
 	if !m.lastSavedAt.IsZero() {
-		saveInfo = fmt.Sprintf("%s seconds ago",
-			time.Since(m.lastSavedAt).Round(time.Second))
+		saveInfo = fmt.Sprintf("%s ago", time.Since(m.lastSavedAt).Round(time.Second))
 	}
+	footer := m.muted(fmt.Sprintf("Save: %s | q / esc / ctrl+c → quit", saveInfo))
 	if m.saveErr != nil {
-		saveInfo = m.deps.Renderer.NewStyle().Foreground(lipgloss.Color("196")).
-			Render("ERROR: " + m.saveErr.Error())
+		footer = m.deps.Renderer.NewStyle().Foreground(m.palette.error).
+			Render("Save error: " + m.saveErr.Error())
 	}
-
-	help := m.deps.Renderer.NewStyle().
-		Foreground(lipgloss.Color("241")).
-		Render("q / esc / ctrl+c → quit")
-
-	footer := m.deps.Renderer.NewStyle().
-		Foreground(lipgloss.Color("241")).
-		Render(fmt.Sprintf("Last save: %s | Help: %s", saveInfo, help))
 
 	body := lipgloss.JoinVertical(lipgloss.Left,
 		title,
+		subtitle,
 		"",
 		petVisual,
+		ground,
 		"",
 		stats,
 		"",
-		actionBar,
+		m.renderActions(p, time.Now()),
 		"",
-		statusLine,
-		"",
+		statusText,
 		footer,
 	)
 
-	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, body)
+	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, m.panel(body))
 }
 
-func label(s string) string {
-	return lipgloss.NewStyle().Foreground(lipgloss.Color("241")).Width(11).Render(s)
+func (m *Model) renderActions(p *game.Pet, now time.Time) string {
+	var actions []string
+
+	switch {
+	case p.Dead:
+		actions = append(actions, m.action("R", "Revive", true))
+	case p.Sleeping:
+		actions = append(actions, m.action("S", "Wake up!", true))
+	default:
+		feedLeft := cooldownRemaining(now, p.LastFed, m.deps.Balance.Feed.Cooldown.Std())
+		feedLabel := "Feed"
+		feedEnabled := true
+		switch {
+		case p.Satiety >= m.deps.Balance.Feed.MaxSatiety:
+			feedLabel = "Feed (Full)"
+			feedEnabled = false
+		case feedLeft > 0:
+			feedLabel = "Feed (" + formatCooldown(feedLeft) + ")"
+			feedEnabled = false
+		}
+		actions = append(actions, m.action("F", feedLabel, feedEnabled))
+
+		playLeft := cooldownRemaining(now, p.LastPlayed, m.deps.Balance.Play.Cooldown.Std())
+		playLabel := "Play"
+		playEnabled := true
+		switch {
+		case p.Energy < m.deps.Balance.Play.MinEnergy:
+			playLabel = "Play (Tired)"
+			playEnabled = false
+		case playLeft > 0:
+			playLabel = "Play (" + formatCooldown(playLeft) + ")"
+			playEnabled = false
+		}
+		actions = append(actions, m.action("P", playLabel, playEnabled))
+		actions = append(actions, m.action("S", "Sleep", true))
+	}
+
+	return strings.Join(actions, "   ")
+}
+
+func (m *Model) action(key, label string, enabled bool) string {
+	keyColor := m.palette.accent
+	labelColor := m.palette.text
+	if !enabled {
+		keyColor = m.palette.muted
+		labelColor = m.palette.muted
+	}
+
+	keyStyle := m.deps.Renderer.NewStyle().Bold(true).Foreground(keyColor)
+	labelStyle := m.deps.Renderer.NewStyle().Foreground(labelColor)
+	return keyStyle.Render("["+key+"]") + " " + labelStyle.Render(label)
+}
+
+func (m *Model) label(s string) string {
+	return m.deps.Renderer.NewStyle().Foreground(m.palette.muted).Width(12).Render(s)
+}
+
+func (m *Model) muted(s string) string {
+	return m.deps.Renderer.NewStyle().Foreground(m.palette.muted).Render(s)
+}
+
+func (m *Model) panel(body string) string {
+	return m.deps.Renderer.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(m.palette.border).
+		Padding(0, 2).
+		Render(body)
+}
+
+func cooldownRemaining(now, last time.Time, cooldown time.Duration) time.Duration {
+	if last.IsZero() || cooldown <= 0 {
+		return 0
+	}
+	remaining := cooldown - now.Sub(last)
+	if remaining < 0 {
+		return 0
+	}
+	return remaining
+}
+
+func formatCooldown(remaining time.Duration) string {
+	if remaining <= 0 {
+		return ""
+	}
+	remaining = remaining.Round(time.Second)
+	switch {
+	case remaining < time.Minute:
+		return fmt.Sprintf("%ds", int(remaining.Seconds()))
+	case remaining < time.Hour:
+		return fmt.Sprintf("%dm", int(math.Ceil(remaining.Minutes())))
+	default:
+		return fmt.Sprintf("%dh", int(math.Ceil(remaining.Hours())))
+	}
 }
 
 func shorten(fp string) string {
